@@ -1,0 +1,8 @@
+#!/bin/bash
+
+docker run --rm -i \
+  -v "$HOME/.local/share/opencode:/home/opencode/.local/share/opencode" \
+  -v "$HOME/.config/opencode:/home/opencode/.config/opencode" \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  opencode-ai:latest "$@"
