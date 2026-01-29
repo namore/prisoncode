@@ -1,6 +1,6 @@
 #!/bin/bash
 
-docker run --rm -i \
+docker run --rm -it \
   -v "$HOME/.local/share/opencode:/home/opencode/.local/share/opencode" \
   -v "$HOME/.config/opencode:/home/opencode/.config/opencode" \
   -v "$PWD:/workspace" \
