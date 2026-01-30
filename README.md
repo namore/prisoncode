@@ -1,6 +1,6 @@
 # Prisoncode
 
-**Prisoncode** is a thin wrapper around **opencode** that runs the tool inside a Docker container. The container provides a sandboxed environment, exposing only the current working directory and the opencode configuration and session files. This approach improves security by preventing opencode from accessing or modifying files outside of its designated workspace.
+**Prisoncode** is a thin wrapper around **opencode** that runs the tool inside a Docker container. The container provides a sandboxed environment, exposing only the current working directory plus the opencode auth and configuration files. This approach improves security by preventing opencode from accessing or modifying files outside of its designated workspace.
 
 The original implementation was based on the blog post:
 
@@ -10,7 +10,7 @@ The original implementation was based on the blog post:
 
 ## Platform support
 
-The wrapper is designed to be **platform‑independent**, but it has only been tested on **macOS** so far. Testing on other operating systems (Linux, Windows) is still pending. Contributions to improve cross‑platform compatibility are welcome.
+The wrapper is designed to be **platform‑independent**. It includes UID/GID mapping via `fixuid` to avoid permission issues when running on Linux or WSL. Contributions to improve cross‑platform compatibility are welcome.
 
 ---
 
@@ -23,6 +23,8 @@ prisoncode <args>
 ```
 
 The command behaves exactly like `opencode` but runs inside the Docker container, keeping the host system safe.
+
+The container runs as a non-root user and maps your host UID/GID. Only `auth.json` and the opencode config directory are mounted, and both are mounted read-only.
 
 > **Note:** If your workflow requires additional compilers or build tools, you must add them manually to the `Dockerfile`.
 
