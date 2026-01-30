@@ -1,8 +1,9 @@
 #!/bin/bash
 
 docker run --rm -it \
-  -v "$HOME/.local/share/opencode:/home/opencode/.local/share/opencode" \
-  -v "$HOME/.config/opencode:/home/opencode/.config/opencode" \
+  -u $(id -u):$(id -g) \
+  -v "$HOME/.local/share/opencode/auth.json:/home/ubuntu/.local/share/opencode/auth.json:ro" \
+  -v "$HOME/.config/opencode:/home/ubuntu/.config/opencode:ro" \
   -v "$PWD:/workspace" \
   -w /workspace \
   opencode-ai:latest "$@"
