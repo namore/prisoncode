@@ -10,8 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     sudo \
     build-essential \
-    cmake \
-  && rm -rf /var/lib/apt/lists/*
+    cmake
 
 # Use existing non-root user
 RUN echo "ubuntu ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/ubuntu \
@@ -38,6 +37,21 @@ RUN curl -fsSL https://opencode.ai/install | bash
 
 RUN mkdir -p /home/ubuntu/.local/share/opencode
 RUN mkdir -p /home/ubuntu/.config
+
+# -------------------------------------------------
+# User‑defined package installation (last layer)
+# -------------------------------------------------
+ARG USER_PKGS=""
+ARG PKGS_HASH=""
+ARG REPO_PATH=""
+LABEL org.prisoncode.packages_hash="${PKGS_HASH}"
+LABEL org.prisoncode.repo_path="${REPO_PATH}"
+RUN if [ -n "${USER_PKGS}" ]; then \
+        echo "Installing user packages: ${USER_PKGS}" && \
+        sudo apt-get install -y ${USER_PKGS}; \
+    fi          
+
+RUN sudo rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["fixuid"]
 CMD ["/home/ubuntu/.opencode/bin/opencode"]

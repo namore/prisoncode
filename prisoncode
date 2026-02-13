@@ -1,9 +1,107 @@
-#!/bin/bash
+#!/bin/sh
 
+# -------------------------------------------------
+# prisoncode – thin wrapper around the opencode CLI
+# Added support for --reinstall and cache handling
+# -------------------------------------------------
+
+
+
+# -------------------------------------------------
+# prisoncode – thin wrapper around the opencode CLI
+# Uses POSIX-compatible getopt for option parsing.
+# -------------------------------------------------
+
+show_help() {
+  cat <<'EOF'
+Usage: prisoncode [options] -- [opencode arguments]
+
+Options:
+  -h, --help          Show this help message and exit.
+  -r, --reinstall     Rebuild Docker image and reinstall wrapper (updates packages cache).
+
+Any arguments after '--' are passed directly to opencode.
+EOF
+}
+
+# -------------------------------------------------
+# Parse options using built‑in getopts for portability
+# -------------------------------------------------
+# Process options using getopts for portability
+REINSTALL=no
+
+# Helper: get a label from the Docker image
+get_image_label() {
+  docker image inspect --format "{{ index .Config.Labels \"$1\" }}" "$2" 2>/dev/null
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    -r|--reinstall)
+      REINSTALL=yes
+      shift
+      ;;
+    --) # End of options, remaining args are forwarded
+      shift
+      break
+      ;;
+    *)
+      # Unknown option or positional argument, stop parsing
+      break
+      ;;
+  esac
+  done
+
+# -------------------------------------------------
+# Detect changes in packages.txt using image label
+# -------------------------------------------------
+# Compute current hash of packages.txt (empty if missing)
+if [ -f "${HOME}/.prisoncode/packages.txt" ]; then
+  CURRENT_HASH=$(shasum -a 256 "${HOME}/.prisoncode/packages.txt" | awk '{print $1}')
+else
+  CURRENT_HASH=""
+fi
+
+# Read hash stored in Docker image label
+IMAGE_HASH=$(get_image_label "org.prisoncode.packages_hash" "prisoncode:latest")
+# If label missing, treat as empty
+[ -z "$IMAGE_HASH" ] && IMAGE_HASH=""
+
+if [ "$CURRENT_HASH" != "$IMAGE_HASH" ]; then
+  echo "⚠️  ~/.prisoncode/packages.txt has changed since the Docker image was built."
+  echo "   Run 'prisoncode -r' (or '--reinstall') to rebuild the container."
+  sleep 1
+fi
+
+# If reinstall requested, rebuild using repository path from image label
+if [ "$REINSTALL" = "yes" ]; then
+  REPO_PATH=$(get_image_label "org.prisoncode.repo_path" "prisoncode:latest")
+  if [ -z "$REPO_PATH" ]; then
+    echo "Error: repository path not known (missing label). Cannot reinstall."
+    exit 1
+  fi
+  echo "Reinstalling: rebuilding Docker image and updating cache..."
+  (cd "$REPO_PATH" && make install) || {
+    echo "Reinstall failed."
+    exit 1
+  }
+  echo "Reinstalling: success"
+  exit 0
+fi
+
+# Remaining arguments (after '--') are what we forward
+FORWARD_ARGS="$@"
+
+# -------------------------------------------------
+# Run opencode inside the Docker container
+# -------------------------------------------------
 docker run --rm -it \
-  -u $(id -u):$(id -g) \
+  -u "$(id -u):$(id -g)" \
   -v "$HOME/.local/share/opencode/auth.json:/home/ubuntu/.local/share/opencode/auth.json:ro" \
   -v "$HOME/.config/opencode:/home/ubuntu/.config/opencode:ro" \
   -v "$PWD:/workspace" \
   -w /workspace \
-  opencode-ai:latest "$@"
+  prisoncode:latest /home/ubuntu/.opencode/bin/opencode $FORWARD_ARGS
