@@ -32,6 +32,8 @@ The container runs as a non-root user and maps your host UID/GID. Only `auth.jso
 
 ## Installation
 
+For optional custom package installation, see the **Custom package list** section below.
+
 ```bash
 # Build the Docker image
 make build
@@ -42,7 +44,49 @@ make install
 
 After running `make install`, the `prisoncode` executable will be available in `~/bin`. Ensure that `~/bin` is on your `PATH` or invoke it with the full path.
 
+
+
 ---
+
+## Custom package list
+
+`prisoncode` can install additional Ubuntu 24.04 packages inside the Docker container based on a user‑defined list. The list is read from:
+
+```
+$HOME/.prisoncode/packages.txt
+```
+
+### Format
+* One package per line.
+* Lines starting with `#` are treated as comments and ignored.
+* Empty lines are ignored.
+
+Example:
+
+```text
+# Packages required for my project
+git
+curl
+ffmpeg
+```
+
+When the wrapper runs it checks a SHA‑256 hash of this file against a hash stored in the Docker image. If the file has changed, you will see a warning:
+
+```
+⚠️  ~/.prisoncode/packages.txt has changed since the Docker image was built.
+   Run 'prisoncode -r' (or '--reinstall') to rebuild the container.
+```
+
+### Rebuilding the image
+After editing `packages.txt`, rebuild the Docker image (and update the cached hash) with the `--reinstall` flag:
+
+```bash
+prisoncode -r
+```
+
+This triggers `make install`, which rebuilds the image using the current package list.
+
+> **Note:** The packages must be available for Ubuntu 24.04 (as used by the container) and can be installed via `apt-get install <name>`.
 
 ## Contributing & Issues
 
