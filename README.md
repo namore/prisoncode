@@ -2,6 +2,8 @@
 
 **Prisoncode** is a thin wrapper around **opencode** that runs the tool inside a Docker container. The container provides a sandboxed environment, exposing only the current working directory plus the opencode auth and configuration files. This approach improves security by preventing opencode from accessing or modifying files outside of its designated workspace.
 
+Recent egress security enhancements add a default-deny network model: container traffic is forced through a local Squid proxy, only endpoints in `~/.prisoncode/domains.txt` are allowed, direct outbound networking from the app container is blocked, and startup validation now enforces a non-empty allowlist (unless `--unrestricted-network` is explicitly used).
+
 The original implementation was based on the blog post:
 
 > https://www.nuface.tw/running-opencode-ai-using-docker-2/
