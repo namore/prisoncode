@@ -37,6 +37,8 @@ RUN curl -fsSL https://opencode.ai/install | bash
 
 RUN mkdir -p /home/ubuntu/.local/share/opencode
 RUN mkdir -p /home/ubuntu/.config
+RUN sudo mkdir -p /home/ubuntu/.cache/opencode \
+ && sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local/share/opencode
 
 # -------------------------------------------------
 # User‑defined package installation (last layer)

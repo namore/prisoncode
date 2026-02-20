@@ -1,0 +1,36 @@
+services:
+  proxy:
+    image: ubuntu/squid:latest
+    volumes:
+      - ./squid.conf:/etc/squid/squid.conf:ro
+      - ${PRISONCODE_DOMAINS_FILE:?PRISONCODE_DOMAINS_FILE is required}:/etc/squid/allowlist_domains.txt:ro
+      - ${PRISONCODE_IPS_FILE:?PRISONCODE_IPS_FILE is required}:/etc/squid/allowlist_ips.txt:ro
+    networks:
+      - app_net
+      - egress_net
+
+  app:
+    image: prisoncode:latest
+    user: ${PRISONCODE_UID:-1000}:${PRISONCODE_GID:-1000}
+    stdin_open: true
+    tty: true
+    environment:
+      HTTP_PROXY: http://proxy:3128
+      HTTPS_PROXY: http://proxy:3128
+      NO_PROXY: localhost,127.0.0.1
+      TERM: xterm-256color
+    networks:
+      - app_net
+    depends_on:
+      - proxy
+    volumes:
+      - ${PRISONCODE_AUTH_FILE:?PRISONCODE_AUTH_FILE is required}:/home/ubuntu/.local/share/opencode/auth.json:ro
+      - ${PRISONCODE_CONFIG_DIR:?PRISONCODE_CONFIG_DIR is required}:/home/ubuntu/.config/opencode:ro
+      - ${PRISONCODE_WORKSPACE:?PRISONCODE_WORKSPACE is required}:/workspace
+    working_dir: /workspace
+
+networks:
+  app_net:
+    internal: true
+  egress_net:
+    driver: bridge

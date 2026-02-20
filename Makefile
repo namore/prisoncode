@@ -1,4 +1,4 @@
-.PHONY: build install
+.PHONY: build test install
 
 # User package list (default location)
 USER_PKGS_FILE ?= $(HOME)/.prisoncode/packages.txt
@@ -17,8 +17,16 @@ build:
 		--build-arg REPO_PATH="$(PWD)" \
 		-t prisoncode:latest .
 
+test:
+	@sh scripts/selftest-prisoncode-validations.sh
+
+INSTALL_DEPS := build
+ifneq ($(SKIP_TESTS),1)
+INSTALL_DEPS := test build
+endif
+
 # Install the wrapper script to $HOME/bin and make it executable
-install: build
+install: $(INSTALL_DEPS)
 	@mkdir -p "$(HOME)/bin"
 	@cp prisoncode "$(HOME)/bin/"
 	@chmod +x "$(HOME)/bin/prisoncode"

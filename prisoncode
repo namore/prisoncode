@@ -1,17 +1,5 @@
 #!/bin/sh
 
-# -------------------------------------------------
-# prisoncode – thin wrapper around the opencode CLI
-# Added support for --reinstall and cache handling
-# -------------------------------------------------
-
-
-
-# -------------------------------------------------
-# prisoncode – thin wrapper around the opencode CLI
-# Uses POSIX-compatible getopt for option parsing.
-# -------------------------------------------------
-
 show_help() {
   cat <<'EOF'
 Usage: prisoncode [options] -- [opencode arguments]
@@ -19,21 +7,223 @@ Usage: prisoncode [options] -- [opencode arguments]
 Options:
   -h, --help          Show this help message and exit.
   -r, --reinstall     Rebuild Docker image and reinstall wrapper (updates packages cache).
+      --bash          Run bash in the container instead of opencode.
+      --unrestricted-network
+                       Disable network restrictions (testing only).
 
-Any arguments after '--' are passed directly to opencode.
+Any arguments after '--' are passed directly to opencode (or bash with --bash).
 EOF
 }
 
-# -------------------------------------------------
-# Parse options using built‑in getopts for portability
-# -------------------------------------------------
-# Process options using getopts for portability
-REINSTALL=no
+create_domains_template() {
+  domains_file="$1"
+  cat <<'EOF' > "$domains_file"
+# One domain per line.
+# Prefix with a dot to allow all subdomains, for example:
+# .example.com
+# IP addresses are allowed too, for example:
+# 192.168.1.10
+EOF
+}
 
-# Helper: get a label from the Docker image
 get_image_label() {
   docker image inspect --format "{{ index .Config.Labels \"$1\" }}" "$2" 2>/dev/null
 }
+
+resolve_auth_file() {
+  if [ -n "${PRISONCODE_AUTH_FILE:-}" ]; then
+    printf '%s\n' "$PRISONCODE_AUTH_FILE"
+    return 0
+  fi
+
+  candidate_xdg="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+  candidate_macos="$HOME/Library/Application Support/opencode/auth.json"
+
+  if [ -f "$candidate_xdg" ]; then
+    printf '%s\n' "$candidate_xdg"
+    return 0
+  fi
+
+  if [ -f "$candidate_macos" ]; then
+    printf '%s\n' "$candidate_macos"
+    return 0
+  fi
+
+  printf '%s\n' "$candidate_xdg"
+}
+
+resolve_config_dir() {
+  if [ -n "${PRISONCODE_CONFIG_DIR:-}" ]; then
+    printf '%s\n' "$PRISONCODE_CONFIG_DIR"
+    return 0
+  fi
+
+  candidate_xdg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+  candidate_macos="$HOME/Library/Application Support/opencode"
+
+  if [ -d "$candidate_xdg" ]; then
+    printf '%s\n' "$candidate_xdg"
+    return 0
+  fi
+
+  if [ -d "$candidate_macos" ]; then
+    printf '%s\n' "$candidate_macos"
+    return 0
+  fi
+
+  printf '%s\n' "$candidate_xdg"
+}
+
+copy_runtime_mounts() {
+  source_auth_file="$1"
+  source_config_dir="$2"
+
+  RUNTIME_AUTH_FILE=$(mktemp "${TMPDIR:-/tmp}/prisoncode-auth.XXXXXX") || return 1
+  if ! cp -L "$source_auth_file" "$RUNTIME_AUTH_FILE"; then
+    return 1
+  fi
+  chmod 600 "$RUNTIME_AUTH_FILE" 2>/dev/null || true
+
+  RUNTIME_CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/prisoncode-config.XXXXXX") || return 1
+  if ! cp -R -L "$source_config_dir/." "$RUNTIME_CONFIG_DIR/"; then
+    return 1
+  fi
+}
+
+cleanup_temp_files() {
+  [ -n "${DOMAINS_ALLOWLIST:-}" ] && rm -f "$DOMAINS_ALLOWLIST"
+  [ -n "${IPS_ALLOWLIST:-}" ] && rm -f "$IPS_ALLOWLIST"
+  [ -n "${RUNTIME_AUTH_FILE:-}" ] && rm -f "$RUNTIME_AUTH_FILE"
+  [ -n "${RUNTIME_CONFIG_DIR:-}" ] && rm -rf "$RUNTIME_CONFIG_DIR"
+}
+
+validate_domains_policy() {
+  domains_source="$1"
+
+  if [ ! -f "$domains_source" ]; then
+    create_domains_template "$domains_source"
+    echo "Created ~/.prisoncode/domains.txt."
+    echo "Error: ~/.prisoncode/domains.txt must contain at least one allowed endpoint."
+    echo "       Populate it or use --unrestricted-network as a temporary measure."
+    return 1
+  fi
+
+  stats=$(awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+      if ($0 == "*") {
+        wildcard = 1
+      }
+      count++
+    }
+    END {
+      printf "%d %d\n", count, wildcard
+    }
+  ' "$domains_source")
+
+  count=0
+  wildcard=0
+  IFS=' ' read -r count wildcard <<EOF
+$stats
+EOF
+
+  if [ "${count:-0}" -eq 0 ]; then
+    echo "Error: ~/.prisoncode/domains.txt must contain at least one allowed endpoint."
+    echo "       Populate it or use --unrestricted-network as a temporary measure."
+    return 1
+  fi
+
+  if [ "${wildcard:-0}" -ne 0 ]; then
+    echo "Error: '*' in ~/.prisoncode/domains.txt is not supported."
+    echo "       Use --unrestricted-network explicitly when needed."
+    return 1
+  fi
+}
+
+validate_opencode_security_config() {
+  config_dir="$1"
+  config_json="$config_dir/opencode.json"
+
+  if [ ! -f "$config_json" ]; then
+    echo "Error: required config file not found: $config_json"
+    return 1
+  fi
+
+  if [ ! -r "$config_json" ]; then
+    echo "Error: required config file is not readable: $config_json"
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is required to validate $config_json"
+    return 1
+  fi
+
+  if ! python3 - "$config_json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception as exc:
+    print(f"Error: invalid JSON in {path}: {exc}")
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    print(f"Error: {path} must contain a JSON object.")
+    sys.exit(1)
+
+if data.get("share") != "disabled":
+    print(f'Error: {path} must set "share": "disabled".')
+    sys.exit(1)
+
+if "disabled_providers" not in data:
+    print(f'Error: {path} must include "disabled_providers": [...].')
+    sys.exit(1)
+
+if not isinstance(data.get("disabled_providers"), list):
+    print(f'Error: {path} key "disabled_providers" must be an array.')
+    sys.exit(1)
+PY
+  then
+    echo "Fix opencode.json and re-run prisoncode."
+    return 1
+  fi
+}
+
+build_network_allowlists() {
+  domains_source="$1"
+  domains_allowlist_file="$2"
+  ips_allowlist_file="$3"
+
+  if [ ! -f "$domains_source" ]; then
+    create_domains_template "$domains_source"
+    echo "Created ~/.prisoncode/domains.txt (currently empty, deny-all)."
+  fi
+
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+      if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ || $0 ~ /:/) {
+        print >> ips_file
+      } else {
+        print >> domains_file
+      }
+    }
+  ' domains_file="$domains_allowlist_file" ips_file="$ips_allowlist_file" "$domains_source"
+}
+
+REINSTALL=no
+UNRESTRICTED_NETWORK=no
+RUN_BASH=no
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
@@ -44,41 +234,42 @@ while [ $# -gt 0 ]; do
       REINSTALL=yes
       shift
       ;;
-    --) # End of options, remaining args are forwarded
+    --unrestricted-network)
+      UNRESTRICTED_NETWORK=yes
+      shift
+      ;;
+    --bash)
+      RUN_BASH=yes
+      shift
+      ;;
+    --)
       shift
       break
       ;;
     *)
-      # Unknown option or positional argument, stop parsing
       break
       ;;
   esac
-  done
+done
 
-# -------------------------------------------------
-# Detect changes in packages.txt using image label
-# -------------------------------------------------
-# Compute current hash of packages.txt (empty if missing)
 if [ -f "${HOME}/.prisoncode/packages.txt" ]; then
   CURRENT_HASH=$(shasum -a 256 "${HOME}/.prisoncode/packages.txt" | awk '{print $1}')
 else
   CURRENT_HASH=""
 fi
 
-# Read hash stored in Docker image label
 IMAGE_HASH=$(get_image_label "org.prisoncode.packages_hash" "prisoncode:latest")
-# If label missing, treat as empty
 [ -z "$IMAGE_HASH" ] && IMAGE_HASH=""
 
 if [ "$CURRENT_HASH" != "$IMAGE_HASH" ]; then
-  echo "⚠️  ~/.prisoncode/packages.txt has changed since the Docker image was built."
-  echo "   Run 'prisoncode -r' (or '--reinstall') to rebuild the container."
+  echo "WARNING: ~/.prisoncode/packages.txt has changed since the Docker image was built."
+  echo "         Run 'prisoncode -r' (or '--reinstall') to rebuild the container."
   sleep 1
 fi
 
-# If reinstall requested, rebuild using repository path from image label
+REPO_PATH=$(get_image_label "org.prisoncode.repo_path" "prisoncode:latest")
+
 if [ "$REINSTALL" = "yes" ]; then
-  REPO_PATH=$(get_image_label "org.prisoncode.repo_path" "prisoncode:latest")
   if [ -z "$REPO_PATH" ]; then
     echo "Error: repository path not known (missing label). Cannot reinstall."
     exit 1
@@ -92,16 +283,95 @@ if [ "$REINSTALL" = "yes" ]; then
   exit 0
 fi
 
-# Remaining arguments (after '--') are what we forward
-FORWARD_ARGS="$@"
+if [ -z "$REPO_PATH" ]; then
+  echo "Error: repository path not known (missing label)."
+  echo "Run 'prisoncode -r' from the cloned prisoncode repository first."
+  exit 1
+fi
 
-# -------------------------------------------------
-# Run opencode inside the Docker container
-# -------------------------------------------------
-docker run --rm -it \
-  -u "$(id -u):$(id -g)" \
-  -v "$HOME/.local/share/opencode/auth.json:/home/ubuntu/.local/share/opencode/auth.json:ro" \
-  -v "$HOME/.config/opencode:/home/ubuntu/.config/opencode:ro" \
-  -v "$PWD:/workspace" \
-  -w /workspace \
-  prisoncode:latest /home/ubuntu/.opencode/bin/opencode $FORWARD_ARGS
+AUTH_FILE=$(resolve_auth_file)
+CONFIG_DIR=$(resolve_config_dir)
+
+if [ ! -f "$AUTH_FILE" ]; then
+  echo "Error: opencode auth file not found at: $AUTH_FILE"
+  echo "Set PRISONCODE_AUTH_FILE to the correct path or run 'opencode login' on the host first."
+  exit 1
+fi
+
+if [ ! -r "$AUTH_FILE" ]; then
+  echo "Error: opencode auth file is not readable: $AUTH_FILE"
+  exit 1
+fi
+
+if [ ! -d "$CONFIG_DIR" ]; then
+  echo "Error: opencode config directory not found at: $CONFIG_DIR"
+  echo "Set PRISONCODE_CONFIG_DIR to the correct path if your config lives elsewhere."
+  exit 1
+fi
+
+if [ ! -r "$CONFIG_DIR" ]; then
+  echo "Error: opencode config directory is not readable: $CONFIG_DIR"
+  exit 1
+fi
+
+if ! validate_opencode_security_config "$CONFIG_DIR"; then
+  exit 1
+fi
+
+mkdir -p "${HOME}/.prisoncode"
+DOMAINS_SOURCE="${HOME}/.prisoncode/domains.txt"
+
+if [ "$UNRESTRICTED_NETWORK" != "yes" ]; then
+  if ! validate_domains_policy "$DOMAINS_SOURCE"; then
+    exit 1
+  fi
+fi
+
+DOMAINS_ALLOWLIST=""
+IPS_ALLOWLIST=""
+RUNTIME_AUTH_FILE=""
+RUNTIME_CONFIG_DIR=""
+trap cleanup_temp_files EXIT INT TERM
+
+if ! copy_runtime_mounts "$AUTH_FILE" "$CONFIG_DIR"; then
+  echo "Error: failed to prepare runtime auth/config mounts."
+  echo "       Ensure auth/config files and symlink targets are readable."
+  exit 1
+fi
+
+CONTAINER_CMD="/home/ubuntu/.opencode/bin/opencode"
+if [ "$RUN_BASH" = "yes" ]; then
+  CONTAINER_CMD="/bin/bash"
+fi
+
+if [ "$UNRESTRICTED_NETWORK" = "yes" ]; then
+  echo "WARNING: unrestricted network mode enabled (--unrestricted-network)."
+  docker run --rm -it \
+    -u "$(id -u):$(id -g)" \
+    -v "$RUNTIME_AUTH_FILE:/home/ubuntu/.local/share/opencode/auth.json:ro" \
+    -v "$RUNTIME_CONFIG_DIR:/home/ubuntu/.config/opencode:ro" \
+    -v "$PWD:/workspace" \
+    -w /workspace \
+    prisoncode:latest "$CONTAINER_CMD" "$@"
+  exit $?
+fi
+
+COMPOSE_FILE="$REPO_PATH/docker-compose.yml"
+if [ ! -f "$COMPOSE_FILE" ]; then
+  echo "Error: missing compose file at $COMPOSE_FILE"
+  exit 1
+fi
+
+DOMAINS_ALLOWLIST=$(mktemp "${TMPDIR:-/tmp}/prisoncode-domains.XXXXXX")
+IPS_ALLOWLIST=$(mktemp "${TMPDIR:-/tmp}/prisoncode-ips.XXXXXX")
+
+build_network_allowlists "$DOMAINS_SOURCE" "$DOMAINS_ALLOWLIST" "$IPS_ALLOWLIST"
+
+PRISONCODE_WORKSPACE="$PWD" \
+PRISONCODE_AUTH_FILE="$RUNTIME_AUTH_FILE" \
+PRISONCODE_CONFIG_DIR="$RUNTIME_CONFIG_DIR" \
+PRISONCODE_DOMAINS_FILE="$DOMAINS_ALLOWLIST" \
+PRISONCODE_IPS_FILE="$IPS_ALLOWLIST" \
+PRISONCODE_UID="$(id -u)" \
+PRISONCODE_GID="$(id -g)" \
+docker compose --project-directory "$REPO_PATH" -f "$COMPOSE_FILE" run --rm app "$CONTAINER_CMD" "$@"
